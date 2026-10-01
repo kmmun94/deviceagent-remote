@@ -1,0 +1,40 @@
+#!/bin/sh
+# Commit message check — see README.md (Commit messages)
+msg_file="$1"
+AREAS='web|docs|repo'
+
+# drop comment lines git adds in the editor
+body=$(grep -v '^#' "$msg_file")
+subject=$(printf '%s\n' "$body" | sed -n '1p')
+
+fail() {
+  echo "commit-msg: $1" >&2
+  echo "  subject: $subject" >&2
+  echo '  rule: README.md, section "Commit messages"' >&2
+  exit 1
+}
+
+# 1) never any AI attribution, for any tool
+if printf '%s\n' "$body" | grep -qiE '^co-authored-by:|generated with|🤖'; then
+  fail "AI attribution lines (Co-Authored-By / Generated with / robot emoji) are not allowed"
+fi
+
+# 2) git-generated subjects skip the format check
+case "$subject" in
+  "Merge "*|"Revert "*|"fixup! "*|"squash! "*|"amend! "*) exit 0 ;;
+esac
+
+printf '%s' "$subject" | grep -qE "^($AREAS)(\([a-z0-9_-]+\))?: [a-z0-9]" \
+  || fail "subject must be '<area>[(scope)]: <summary>' with area in {$AREAS} and a lowercase summary"
+
+[ "$(printf '%s' "$subject" | wc -m)" -le 72 ] || fail "subject is longer than 72 characters"
+
+case "$subject" in *.) fail "subject must not end with a period" ;; esac
+
+printf '%s' "$subject" | grep -qP '[\x{AC00}-\x{D7A3}]' 2>/dev/null \
+  && fail "subject summary must be English (Korean is fine in the body)"
+
+second=$(printf '%s\n' "$body" | sed -n '2p')
+[ -z "$second" ] || fail "leave a blank line between subject and body"
+
+exit 0
