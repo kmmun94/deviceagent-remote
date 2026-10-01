@@ -112,7 +112,7 @@ input[type=text], input[type=password], input[type=number] {
     <div class="row">
       <button id="pingBtn" disabled>신호 테스트 (hello)</button>
     </div>
-    <p class="hint">PC 켜기는 실수 방지를 위해 두 번 눌러야 보냅니다. 신호 테스트는 보드가 받기만 하고 무시합니다(시리얼 로그로 확인).</p>
+    <p class="hint">PC 켜기는 두 번 눌러야 보내고, 서명 키로 서명한 명령만 보드가 실행합니다(60초 안, 1회용). 신호 테스트는 보드가 받기만 하고 무시합니다.</p>
   </section>
 
   <section class="panel">
@@ -128,6 +128,7 @@ input[type=text], input[type=password], input[type=number] {
           <div class="field"><label for="user">아이디</label><input type="text" id="user" autocomplete="username" required></div>
           <div class="field"><label for="pass">비밀번호</label><input type="password" id="pass" autocomplete="current-password" required></div>
         </div>
+        <div class="field"><label for="hkey">명령 서명 키 (보드 secrets.h의 CMD_HMAC_KEY)</label><input type="password" id="hkey" autocomplete="off" required></div>
         <label class="check"><input type="checkbox" id="remember" checked> 이 기기에 저장</label>
         <div class="row">
           <button type="submit" id="connectBtn">연결</button>
@@ -143,7 +144,7 @@ input[type=text], input[type=password], input[type=number] {
   </section>
 </main>
 
-<script src="https://cdn.jsdelivr.net/npm/mqtt@5.16.0/dist/mqtt.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.16.0/dist/mqtt.min.js" integrity="sha384-9WWboT9UtuPFRlOLq4FygQkcJxzYcpz8SXGkNyCEXM+44n14xzjNlrRKYZwuF/A6" crossorigin="anonymous"></script>
 <script>
 const TOPIC_CMD = 'board/esp32-c6/wol/command';
 const TOPIC_STATUS = 'board/esp32-c6/wol/status';
@@ -180,6 +181,11 @@ function setConn(state, text) {
 }
 
 function setBoard(payload, retained) {
+  if (payload.startsWith('rejected')) {
+    $('boardSub').textContent = '보드가 명령을 거부함: ' + payload.slice(9).trim() + ' · ' + ts();
+    $('boardState').className = 'state warn';
+    return;
+  }
   const s = STATES[payload] || { text: payload, cls: 'warn', sub: '알 수 없는 상태' };
   $('boardState').textContent = s.text;
   $('boardState').className = 'state ' + s.cls;
@@ -190,8 +196,8 @@ function loadSaved() {
   try {
     const v = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
     if (!v) return false;
-    for (const k of ['host', 'port', 'path', 'user', 'pass']) if (v[k] != null) $(k).value = v[k];
-    return !!(v.user && v.pass);
+    for (const k of ['host', 'port', 'path', 'user', 'pass', 'hkey']) if (v[k] != null) $(k).value = v[k];
+    return !!(v.user && v.pass && v.hkey);
   } catch { return false; }
 }
 
@@ -199,7 +205,7 @@ function save() {
   try {
     if ($('remember').checked) {
       localStorage.setItem(STORE_KEY, JSON.stringify({
-        host: $('host').value, port: $('port').value, path: $('path').value, user: $('user').value, pass: $('pass').value,
+        host: $('host').value, port: $('port').value, path: $('path').value, user: $('user').value, pass: $('pass').value, hkey: $('hkey').value,
       }));
     } else localStorage.removeItem(STORE_KEY);
   } catch {}
@@ -232,15 +238,29 @@ function connect() {
   });
   client.on('message', (topic, buf, packet) => {
     const payload = buf.toString();
-    log(topic === TOPIC_CMD ? 'out' : 'in', `${topic.replace('board/esp32-c6/wol/', '')}${packet.retain ? ' [retain]' : ''} ← "${payload}"`);
+    const shown = payload.length > 40 ? payload.slice(0, 32) + '…' : payload;
+    log(topic === TOPIC_CMD ? 'out' : 'in', `${topic.replace('board/esp32-c6/wol/', '')}${packet.retain ? ' [retain]' : ''} ← "${shown}"`);
     if (topic === TOPIC_STATUS) setBoard(payload, packet.retain);
   });
+}
+
+// wake|ts|nonce|hex(HMAC-SHA256(key, "wake|ts|nonce")) — verified by the board
+async function signedWake() {
+  if (!crypto.subtle) throw new Error('이 브라우저는 서명(Web Crypto)을 지원하지 않습니다. https 주소로 여세요');
+  const enc = new TextEncoder();
+  const t = Math.floor(Date.now() / 1000);
+  const nonce = Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2, '0')).join('');
+  const body = `wake|${t}|${nonce}`;
+  const key = await crypto.subtle.importKey('raw', enc.encode($('hkey').value), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(body)));
+  return body + '|' + Array.from(mac, b => b.toString(16).padStart(2, '0')).join('');
 }
 
 function publish(payload) {
   if (!client || !client.connected) return;
   client.publish(TOPIC_CMD, payload, { qos: 1, retain: false }, err => {
-    log(err ? 'err' : 'out', err ? '전송 실패: ' + err.message : `command → "${payload}" 전송`);
+    const shown = payload.startsWith('wake|') ? 'wake (서명됨)' : payload;
+    log(err ? 'err' : 'out', err ? '전송 실패: ' + err.message : `command → ${shown} 전송`);
   });
 }
 
@@ -259,7 +279,8 @@ $('wakeBtn').addEventListener('click', () => {
   }
   clearTimeout(armTimer);
   b.classList.remove('armed'); b.textContent = '메인 PC 켜기';
-  publish('wake');
+  if (!$('hkey').value) { log('err', '연결 설정에 명령 서명 키를 입력하세요'); $('settings').open = true; return; }
+  signedWake().then(publish, err => log('err', '서명 실패: ' + err.message));
 });
 
 if (typeof mqtt === 'undefined') {
@@ -268,7 +289,7 @@ if (typeof mqtt === 'undefined') {
   connect();
 } else {
   $('settings').open = true;
-  log('sys', '연결 설정에 아이디와 비밀번호를 입력하세요');
+  log('sys', '연결 설정에 아이디, 비밀번호, 명령 서명 키를 입력하세요');
 }
 </script>
 </body>
