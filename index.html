@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DeviceAgent 리모컨</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one narrow column — board status on top, the wake control, then the message log. */
+:root {
+  --bg: #eef1f0;
+  --surface: #ffffff;
+  --fg: #17201d;
+  --muted: #5d6b66;
+  --line: #d3dbd8;
+  --accent: #0f7a5c;
+  --accent-fg: #ffffff;
+  --ok: #138a4f;
+  --warn: #b26a00;
+  --bad: #c0392b;
+  --font-body: "IBM Plex Sans KR", system-ui, -apple-system, "Malgun Gothic", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #101614; --surface: #18201d; --fg: #e3ebe8; --muted: #93a39d; --line: #2a3632;
+    --accent: #2fb488; --accent-fg: #06120d; --ok: #3ccf86; --warn: #e3a23b; --bad: #ef6b5d;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #101614; --surface: #18201d; --fg: #e3ebe8; --muted: #93a39d; --line: #2a3632;
+  --accent: #2fb488; --accent-fg: #06120d; --ok: #3ccf86; --warn: #e3a23b; --bad: #ef6b5d;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.5 var(--font-body);
+  padding-inline: 16px; padding-block: 20px 32px;
+}
+main { max-width: 34rem; margin: 0 auto; display: grid; gap: 16px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 { font-size: 1.25rem; margin: 0; text-wrap: balance; }
+.conn { font-size: .8rem; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: grid; gap: 12px; min-width: 0; }
+.label { font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+
+.board { display: flex; align-items: center; gap: 14px; }
+.state { font-size: 1.6rem; font-weight: 700; line-height: 1.2; }
+.state.ok { color: var(--ok); } .state.bad { color: var(--bad); } .state.warn { color: var(--warn); }
+.sub { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+
+button {
+  font: inherit; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); color: var(--fg);
+  padding: 10px 14px; cursor: pointer;
+}
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.wake {
+  width: 100%; padding: 18px; font-size: 1.15rem; font-weight: 700;
+  background: var(--accent); color: var(--accent-fg); border-color: var(--accent);
+}
+.wake.armed { background: var(--warn); border-color: var(--warn); color: #111; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+.row > * { flex: 1 1 8rem; }
+.hint { font-size: .82rem; color: var(--muted); margin: 0; }
+
+details summary { cursor: pointer; font-weight: 500; }
+form { display: grid; gap: 10px; margin-top: 12px; }
+.field { display: grid; gap: 4px; }
+.field label { font-size: .8rem; color: var(--muted); }
+input[type=text], input[type=password], input[type=number] {
+  font: inherit; font-family: var(--font-mono); font-size: .85rem; width: 100%;
+  padding: 9px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+}
+.check { display: flex; gap: 8px; align-items: center; font-size: .85rem; }
+
+.log { font-family: var(--font-mono); font-size: .78rem; max-height: 22rem; overflow: auto; display: grid; gap: 2px; }
+.log div { display: grid; grid-template-columns: auto 1fr; gap: 10px; padding: 3px 0; border-bottom: 1px dashed var(--line); }
+.log time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.log span { overflow-wrap: anywhere; min-width: 0; }
+.log .in { color: var(--fg); } .log .out { color: var(--accent); } .log .sys { color: var(--muted); } .log .err { color: var(--bad); }
+@media (prefers-reduced-motion: no-preference) { .wake { transition: background .15s; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>DeviceAgent 리모컨</h1>
+    <div class="conn"><span class="dot" id="connDot"></span><span id="connText">연결 안 됨</span></div>
+  </header>
+
+  <section class="panel" aria-live="polite">
+    <div class="label">보드 (ESP32-C6)</div>
+    <div class="board">
+      <div>
+        <div class="state" id="boardState">—</div>
+        <div class="sub" id="boardSub">브로커에 연결하면 보드 상태가 표시됩니다</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <button class="wake" id="wakeBtn" disabled>메인 PC 켜기</button>
+    <div class="row">
+      <button id="pingBtn" disabled>신호 테스트 (hello)</button>
+    </div>
+    <p class="hint">PC 켜기는 실수 방지를 위해 두 번 눌러야 보냅니다. 신호 테스트는 보드가 받기만 하고 무시합니다(시리얼 로그로 확인).</p>
+  </section>
+
+  <section class="panel">
+    <details id="settings">
+      <summary>연결 설정</summary>
+      <form id="connForm" autocomplete="on">
+        <div class="field"><label for="host">브로커 주소</label><input type="text" id="host" value="u61b1f9b.ala.asia-southeast1.emqxsl.com" required></div>
+        <div class="row">
+          <div class="field"><label for="port">WSS 포트</label><input type="number" id="port" value="8084" required></div>
+          <div class="field"><label for="path">경로</label><input type="text" id="path" value="/mqtt" required></div>
+        </div>
+        <div class="row">
+          <div class="field"><label for="user">아이디</label><input type="text" id="user" autocomplete="username" required></div>
+          <div class="field"><label for="pass">비밀번호</label><input type="password" id="pass" autocomplete="current-password" required></div>
+        </div>
+        <label class="check"><input type="checkbox" id="remember" checked> 이 기기에 저장</label>
+        <div class="row">
+          <button type="submit" id="connectBtn">연결</button>
+          <button type="button" id="disconnectBtn" disabled>연결 끊기</button>
+        </div>
+      </form>
+    </details>
+  </section>
+
+  <section class="panel">
+    <div class="label">메시지 로그</div>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.16.0/dist/mqtt.min.js"></script>
+<script>
+const TOPIC_CMD = 'board/esp32-c6/wol/command';
+const TOPIC_STATUS = 'board/esp32-c6/wol/status';
+const STORE_KEY = 'deviceagent.conn';
+const $ = id => document.getElementById(id);
+let client = null;
+let armTimer = null;
+
+const STATES = {
+  online:   { text: '온라인', cls: 'ok',   sub: '명령 대기 중' },
+  wol_sent: { text: 'WoL 전송함', cls: 'ok', sub: '매직 패킷을 보냈습니다. PC 부팅까지 수십 초 걸릴 수 있습니다' },
+  offline:  { text: '오프라인', cls: 'bad', sub: '보드 전원 또는 Wi-Fi를 확인하세요' },
+};
+
+function ts(d = new Date()) { return d.toLocaleTimeString('ko-KR', { hour12: false }); }
+
+function log(kind, text) {
+  const row = document.createElement('div');
+  row.innerHTML = '<time></time><span></span>';
+  row.firstChild.textContent = ts();
+  row.lastChild.textContent = text;
+  row.lastChild.className = kind;
+  const box = $('log');
+  box.prepend(row);
+  while (box.children.length > 200) box.lastChild.remove();
+}
+
+function setConn(state, text) {
+  $('connDot').className = 'dot ' + state;
+  $('connText').textContent = text;
+  const on = state === 'ok';
+  $('wakeBtn').disabled = !on; $('pingBtn').disabled = !on;
+  $('disconnectBtn').disabled = !client;
+}
+
+function setBoard(payload, retained) {
+  const s = STATES[payload] || { text: payload, cls: 'warn', sub: '알 수 없는 상태' };
+  $('boardState').textContent = s.text;
+  $('boardState').className = 'state ' + s.cls;
+  $('boardSub').textContent = s.sub + (retained ? ' · 마지막으로 저장된 상태' : ' · ' + ts());
+}
+
+function loadSaved() {
+  try {
+    const v = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
+    if (!v) return false;
+    for (const k of ['host', 'port', 'path', 'user', 'pass']) if (v[k] != null) $(k).value = v[k];
+    return !!(v.user && v.pass);
+  } catch { return false; }
+}
+
+function save() {
+  try {
+    if ($('remember').checked) {
+      localStorage.setItem(STORE_KEY, JSON.stringify({
+        host: $('host').value, port: $('port').value, path: $('path').value, user: $('user').value, pass: $('pass').value,
+      }));
+    } else localStorage.removeItem(STORE_KEY);
+  } catch {}
+}
+
+function connect() {
+  if (client) client.end(true);
+  const url = `wss://${$('host').value.trim()}:${$('port').value}${$('path').value}`;
+  const clientId = 'web-' + Math.random().toString(16).slice(2, 8);
+  log('sys', `연결 시도 ${url} (client ${clientId})`);
+  setConn('warn', '연결 중…');
+  client = mqtt.connect(url, {
+    clientId, username: $('user').value, password: $('pass').value,
+    reconnectPeriod: 5000, connectTimeout: 10000, clean: true,
+  });
+  client.on('connect', () => {
+    setConn('ok', '연결됨');
+    log('sys', '브로커 연결됨');
+    client.subscribe('board/esp32-c6/wol/#', { qos: 1 }, err => {
+      log(err ? 'err' : 'sys', err ? '구독 실패: ' + err.message : '구독: board/esp32-c6/wol/#');
+    });
+    $('settings').open = false;
+  });
+  client.on('reconnect', () => setConn('warn', '재연결 중…'));
+  client.on('close', () => { if (client && !client.connected) setConn('bad', '연결 끊김'); });
+  client.on('error', err => {
+    const msg = /Not authorized|Bad User Name/i.test(err.message) ? '아이디/비밀번호가 거부됨' : err.message;
+    log('err', '오류: ' + msg);
+    setConn('bad', '오류');
+  });
+  client.on('message', (topic, buf, packet) => {
+    const payload = buf.toString();
+    log(topic === TOPIC_CMD ? 'out' : 'in', `${topic.replace('board/esp32-c6/wol/', '')}${packet.retain ? ' [retain]' : ''} ← "${payload}"`);
+    if (topic === TOPIC_STATUS) setBoard(payload, packet.retain);
+  });
+}
+
+function publish(payload) {
+  if (!client || !client.connected) return;
+  client.publish(TOPIC_CMD, payload, { qos: 1, retain: false }, err => {
+    log(err ? 'err' : 'out', err ? '전송 실패: ' + err.message : `command → "${payload}" 전송`);
+  });
+}
+
+$('connForm').addEventListener('submit', e => { e.preventDefault(); save(); connect(); });
+$('disconnectBtn').addEventListener('click', () => {
+  if (client) { client.end(true); client = null; }
+  setConn('', '연결 안 됨'); log('sys', '연결 끊음');
+});
+$('pingBtn').addEventListener('click', () => publish('hello'));
+$('wakeBtn').addEventListener('click', () => {
+  const b = $('wakeBtn');
+  if (!b.classList.contains('armed')) {
+    b.classList.add('armed'); b.textContent = '한 번 더 누르면 PC를 켭니다';
+    armTimer = setTimeout(() => { b.classList.remove('armed'); b.textContent = '메인 PC 켜기'; }, 3000);
+    return;
+  }
+  clearTimeout(armTimer);
+  b.classList.remove('armed'); b.textContent = '메인 PC 켜기';
+  publish('wake');
+});
+
+if (typeof mqtt === 'undefined') {
+  log('err', 'MQTT 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인하세요.');
+} else if (loadSaved()) {
+  connect();
+} else {
+  $('settings').open = true;
+  log('sys', '연결 설정에 아이디와 비밀번호를 입력하세요');
+}
+</script>
+</body>
+</html>
